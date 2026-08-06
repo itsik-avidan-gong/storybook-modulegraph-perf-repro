@@ -1,0 +1,18 @@
+{
+  "name": "storybook-modulegraph-perf-repro",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "generate": "node generate.mjs",
+    "storybook": "storybook dev -p 6008 --no-open"
+  },
+  "devDependencies": {
+    "@storybook/react-vite": "10.5.5",
+    "@vitejs/plugin-react": "6.0.4",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "storybook": "10.5.5",
+    "vite": "8.1.5"
+  }
+}
