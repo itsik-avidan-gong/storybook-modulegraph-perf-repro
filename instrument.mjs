@@ -1,9 +1,8 @@
-// Optional. Patches a console.log into Storybook's `reverseIndexToStoriesByFile`
+// Patches a console.log into Storybook's `reverseIndexToStoriesByFile`
 // so each rebuild of the module-graph reverse index announces itself and its
-// size. The CPU cost is visible without this; the log just makes the cause
-// obvious rather than something you have to infer from a profile.
+// size.
 //
-// Re-run after any `npm install`, which restores the pristine dist.
+// Run `npm install` to remove the patch.
 //
 // usage: node instrument.mjs [--revert]
 import {readdirSync, readFileSync, writeFileSync} from 'node:fs'
@@ -11,8 +10,8 @@ import {readdirSync, readFileSync, writeFileSync} from 'node:fs'
 const DIR = 'node_modules/storybook/dist/_node-chunks'
 const ANCHOR = 'function reverseIndexToStoriesByFile(index, workingDir) {'
 
-// The chunk filename is a build hash and changes between Storybook releases,
-// so find the file by content instead of hardcoding it.
+// The chunk filename is a build hash and changes between Storybook releases.
+// Find the file by content instead of hardcoding it.
 const candidates = readdirSync(DIR)
   .filter(f => f.endsWith('.js'))
   .filter(f => readFileSync(`${DIR}/${f}`, 'utf8').includes(ANCHOR))

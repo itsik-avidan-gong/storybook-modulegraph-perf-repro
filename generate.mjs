@@ -1,6 +1,5 @@
 // Generates a synthetic project whose module-graph reverse index has roughly
-// STORIES * MODULES entries -- the quantity that drives ModuleGraphEngine's
-// per-save cost. File count stays small; it is graph *density* that matters.
+// STORIES * MODULES entries.
 import {mkdirSync, writeFileSync, rmSync} from 'node:fs'
 
 const STORIES = Number(process.env.STORIES ?? 400)
@@ -17,7 +16,8 @@ for (let i = 0; i < MODULES; i++) {
   )
 }
 
-// A barrel every story imports, so each story transitively depends on all modules.
+// A barrel file that every story imports, to make each story transitively depend
+// on all modules.
 writeFileSync(
   'src/shared/index.js',
   Array.from({length: MODULES}, (_, i) => `export * from './mod${i}.js'`).join('\n') + '\n',
