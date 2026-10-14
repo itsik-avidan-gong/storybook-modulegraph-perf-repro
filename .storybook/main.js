@@ -4,4 +4,7 @@ export default {
   stories: ['../src/**/*.stories.jsx'],
   addons: [],
   core: { disableWhatsNewNotifications: true, disableTelemetry: true },
+  features: {
+        changeDetection: false,
+    },
 }
