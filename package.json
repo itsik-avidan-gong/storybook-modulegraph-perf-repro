@@ -6,7 +6,8 @@
   "scripts": {
     "generate": "node generate.mjs",
     "cleanup": "node cleanup.mjs",
-    "storybook": "storybook dev -p 6008 --no-open"
+    "validate": "node validate.mjs",
+    "storybook": "NODE_OPTIONS=\"--max-old-space-size=16000\" storybook dev -p 6008 --no-open"
   },
   "devDependencies": {
     "@storybook/react-vite": "10.6.2",

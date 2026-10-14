@@ -1,96 +1,92 @@
-// Generates a single-project (non-monorepo) layout that reproduces
-// `RangeError: Invalid string length` in Storybook 10.5+/10.6.2.
-//
-// The module-graph reverse index maps every source file to every story file that reaches it.
-// Its JSON snapshot is broadcast over the channel, and fails once it exceeds V8's ~512MB string
-// limit. Size ~= MODULES * (stories reaching each module) * (bytes per story path).
-//
-// Defaults mirror the real repo: ~18.7k source files, 700 stories, long story paths
-// => ~13M index pairs, ~1GB of JSON.
-//
-// usage: node generate.mjs   (idempotent: wipes and recreates ./src; see cleanup.mjs)
+// Generates a synthetic monorepo-like project that mimics the shape of a large project:
+//   - PACKAGES workspace packages, each with MODULES_PER_PKG source files, long paths, and an
+//     index.js barrel that re-exports them all (PACKAGES * MODULES_PER_PKG ~= 18.7k source files)
+//   - modules import siblings, forming dependency chains (BFS depths > 1)
+//   - a root barrel (src/shared/index.js) re-exporting every package barrel
+//   - STORIES story files spread over apps/ and packages/; most import the root barrel, so they
+//     transitively reach nearly every source file, the rest import only a few package barrels
+// The module-graph reverse index (source file -> story files) therefore has roughly
+// 18.7k keys * ~STORIES values, whose JSON exceeds V8's max string length (~512MB).
 import {mkdirSync, writeFileSync, rmSync} from 'node:fs'
-import {posix, join} from 'node:path'
 
-const MODULES = Number(process.env.MODULES ?? 18700)
+const PACKAGES = Number(process.env.PACKAGES ?? 40)
+const MODULES_PER_PKG = Number(process.env.MODULES_PER_PKG ?? 467)
 const STORIES = Number(process.env.STORIES ?? 700)
-const GROUPS = Number(process.env.GROUPS ?? 50)
-// share of stories that import the root barrel (so they reach every module); the rest import
-// only a few group barrels
 const ROOT_BARREL_RATIO = Number(process.env.ROOT_BARREL_RATIO ?? 0.85)
 
-const SRC = join(import.meta.dirname, 'src')
-
-// deterministic PRNG so every run generates the same project
+// deterministic PRNG so the generated project is stable between runs
 let seed = 42
 const rand = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32)
 
-const perGroup = Math.ceil(MODULES / GROUPS)
-const groupName = g => `conversation-intelligence-feature-group-${g}`
-const modulePath = (g, i) => `modules/${groupName(g)}/feature-module-${g}-${i}.js`
-const groupBarrel = g => `modules/${groupName(g)}/index.js`
-const STORY_AREAS = 20
-const storyPath = s =>
-  `stories/revenue-intelligence-area-${s % STORY_AREAS}/ForecastingDashboardPanel${s}.stories.jsx`
+const SUBDIRS = ['components', 'hooks', 'utils', 'models']
+const pkgName = p => `custom-package-${p}`
+const modPath = (p, i) =>
+  `packages/${pkgName(p)}/src/${SUBDIRS[i % SUBDIRS.length]}/feature-module-${i}.js`
 
+rmSync('src', {recursive: true, force: true})
 const write = (file, content) => {
-  const path = join(SRC, file)
-  mkdirSync(posix.dirname(path), {recursive: true})
+  const path = `src/${file}`
+  mkdirSync(path.slice(0, path.lastIndexOf('/')), {recursive: true})
   writeFileSync(path, content)
 }
-const importPath = (from, to) => {
-  const r = posix.relative(posix.dirname(from), to)
-  return r.startsWith('.') ? r : `./${r}`
+// relative import specifier from one src-relative file to another
+const rel = (from, to) => {
+  const f = from.split('/').slice(0, -1)
+  const t = to.split('/')
+  while (f.length && t.length > 1 && f[0] === t[0]) (f.shift(), t.shift())
+  return (f.length ? '../'.repeat(f.length) : './') + t.join('/')
 }
 
-rmSync(SRC, {recursive: true, force: true})
-
-let created = 0
-for (let g = 0; g < GROUPS && created < MODULES; g++) {
+for (let p = 0; p < PACKAGES; p++) {
   const barrel = []
-  for (let i = 0; i < perGroup && created < MODULES; i++, created++) {
-    const file = modulePath(g, i)
-    // chain to earlier siblings so BFS depths vary
-    const deps = [1, 7].filter(back => i - back >= 0).map(back => i - back)
-    const imports = deps.map(
-      d => `import {value_${g}_${d}} from '${importPath(file, modulePath(g, d))}'`,
-    )
-    const sum = [i, ...deps.map(d => `value_${g}_${d}`)].join(' + ')
-    write(file, `${imports.join('\n')}${imports.length ? '\n' : ''}export const value_${g}_${i} = ${sum}\n`)
-    barrel.push(`export * from '${importPath(groupBarrel(g), file)}'`)
+  for (let i = 0; i < MODULES_PER_PKG; i++) {
+    const file = modPath(p, i)
+    const imports = []
+    // chain to up to two earlier siblings => dependency depth grows along the package
+    for (const back of [1, 7]) {
+      if (i - back >= 0) {
+        imports.push(`import {value_${p}_${i - back}} from '${rel(file, modPath(p, i - back))}'`)
+      }
+    }
+    const sum = [i, ...imports.map((_, k) => `value_${p}_${i - [1, 7][k]}`)].join(' + ')
+    write(file, `${imports.join('\n')}\nexport const value_${p}_${i} = ${sum}\n`)
+    barrel.push(`export * from '${rel(`packages/${pkgName(p)}/src/index.js`, file)}'`)
   }
-  write(groupBarrel(g), barrel.join('\n') + '\n')
+  write(`packages/${pkgName(p)}/src/index.js`, barrel.join('\n') + '\n')
 }
 
-const usedGroups = Math.ceil(created / perGroup)
 write(
-  'index.js',
+  'shared/index.js',
   Array.from(
-    {length: usedGroups},
-    (_, g) => `export * from '${importPath('index.js', groupBarrel(g))}'`,
+    {length: PACKAGES},
+    (_, p) => `export * from '${rel('shared/index.js', `packages/${pkgName(p)}/src/index.js`)}'`,
   ).join('\n') + '\n',
 )
 
 for (let s = 0; s < STORIES; s++) {
-  const file = storyPath(s)
-  let imports
+  const inApp = s % 3 !== 0
+  const dir = inApp
+    ? `apps/revenue-intelligence-application-${s % 20}/src/features/forecasting/components`
+    : `packages/${pkgName(s % PACKAGES)}/src/stories`
+  const file = `${dir}/feature${s}.stories.jsx`
+  let importLines
   if (rand() < ROOT_BARREL_RATIO) {
-    imports = `import {value_0_0} from '${importPath(file, 'index.js')}'\n`
+    importLines = `import {value_0_0} from '${rel(file, 'shared/index.js')}'\n`
   } else {
-    const groups = new Set([0, 1, 2].map(() => Math.floor(rand() * usedGroups)))
-    imports =
-      [...groups]
-        .map(g => `import {value_${g}_0} from '${importPath(file, groupBarrel(g))}'`)
-        .join('\n') + '\n'
+    const picked = [0, 1, 2].map(() => Math.floor(rand() * PACKAGES))
+    importLines = [...new Set(picked)]
+      .map(p => `import {value_${p}_0} from '${rel(file, `packages/${pkgName(p)}/src/index.js`)}'`)
+      .join('\n') + '\n'
   }
   write(
     file,
-    imports +
-      `export default {title: 'Generated/Area${s % STORY_AREAS}/Panel${s}', component: () => <div>panel ${s}</div>}\n` +
+    importLines +
+      `export default {title: 'Generated/${inApp ? 'Apps' : 'Packages'}/Panel${s}', component: () => <div>panel ${s}</div>}\n` +
       `export const Default = {}\n`,
   )
 }
 
+const files = PACKAGES * MODULES_PER_PKG
 console.log(
-  `generated ${created} modules in ${usedGroups} groups + ${STORIES} stories => up to ~${((created * STORIES) / 1e6).toFixed(1)}M index pairs`,
+  `generated ${STORIES} stories, ${files} source files => up to ~${((files * STORIES) / 1e6).toFixed(1)}M index pairs`,
 )
