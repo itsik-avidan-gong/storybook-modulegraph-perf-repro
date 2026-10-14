@@ -1,70 +1,65 @@
-# Storybook 10.5 module-graph perf reproduction
+# Storybook 10.6.2: `RangeError: Invalid string length` on a large module graph
 
-A reproduction for a performance regression introduced in `storybook` 10.5. The `ModuleGraphEngine` rebuilds and broadcasts the entire module-graph reverse index on every file-watcher event.
+`storybook dev` prints "Storybook ready!", then the process dies after Vite's optimizer runs:
 
-## Problems demonstrated
-
-1. **Unconditional rebuilds:** `ModuleGraphEngine.mirrorUpdate()` computes the delta of changed files (`bumpedStoryFiles`). But it then re-serializes the whole index anyway. `handleFileChange()` also discards `IncrementalPatcher.patch()`'s return, which already knows the dependency set was unchanged.
-2. **Unrelated files trigger the rebuild:** A file absent from the graph skips the change check entirely, so writing a log file costs as much as editing a story.
-
-## Setup
-
-```sh
-npm install
+```
+RangeError: Invalid string length
+  at JSON.stringify
+  at stringify2 (storybook/dist/_node-chunks/chunk-*.js)
+  at ServerChannelTransport.send (storybook/dist/core-server/index.js)
 ```
 
-Optionally, instrument the cause:
+## Cause
 
-```sh
-node instrument.mjs      # logs each index rebuild and its size
-node instrument.mjs --revert
-```
+`ModuleGraphEngine` builds a reverse index (source file -> every story file reaching it, with BFS depth)
+and applies it through the `core/module-graph-index` service's `_applyIndex` command. After every command,
+`service-transport.ts` emits `services:patches` with the **full** state snapshot, and
+`ServerChannelTransport.send` runs `stringify(event, {maxDepth: 15})` on it with no size guard. When the
+index has `source files x stories` pairs in the millions, the JSON exceeds V8's ~512 MB string limit,
+`JSON.stringify` throws inside a `setImmediate`, and the process exits.
+
+`features.changeDetection: false` does not help: the index is still built and broadcast.
+
+## Shape of the repro
+
+`generate.mjs` mimics the real monorepo (~18.7k source files that every story transitively reaches):
+
+| | default | env var |
+|---|---|---|
+| workspace packages | 40 | `PACKAGES` |
+| source files per package | 467 (=> 18,680 total) | `MODULES_PER_PKG` |
+| story files (in `apps/*` and `packages/*`) | 700 | `STORIES` |
+| stories importing the root barrel (reach everything) | 85% | `ROOT_BARREL_RATIO` |
+
+- Long package/app paths, as in the real repo, so each JSON pair is ~100+ bytes.
+- Each module imports two earlier siblings, so dependency depths vary.
+- Each package has an `index.js` barrel; `src/shared/index.js` re-exports all barrels.
+
+Up to ~13M index pairs => well over 1 GB of JSON.
 
 ## Reproduce
 
 ```sh
-npm run storybook        # port 6008, no browser needed
+pnpm install            # or npm install
+node generate.mjs       # regenerates ./src (~19k files, ~77 MB)
+NODE_OPTIONS=--max-old-space-size=16384 npm run storybook   # port 6008
 ```
 
-Wait for startup to finish. Then note the dev-server process's cumulative CPU
-(`ps -o time= -p <pid>`), and:
+Expected: crash with the stack above shortly after startup. The large heap is needed only so the index
+itself can be built; the crash is the string limit, not heap exhaustion.
+
+Not verified yet: the generator was written and run in a Linux sandbox, but `node_modules` was installed on
+macOS (missing `oxc-resolver` linux binding), so Storybook was not started with this exact config. If it
+does not crash, raise `STORIES` / `MODULES_PER_PKG`.
+
+## Control
+
+`npm install --save-dev storybook@10.4.6 @storybook/react-vite@10.4.6` (no module graph) starts fine on the
+same project.
+
+## Optional instrumentation
 
 ```sh
-echo "" >> src/stories/Comp0.stories.jsx    # a real source edit
-echo "noise" >> unrelated.log               # a file the graph has never seen
+node instrument.mjs            # logs each index rebuild and its pair count
+node instrument.mjs --revert
 ```
-
-Check the CPU delta after each. Both cost the same.
-
-Measured here (400 stories x 1200 modules => 480,800 index pairs, node 22, macOS arm64, 16 cores):
-
-```
-story save:           ~2.66s CPU, 1 rebuild
-unrelated .log write: ~2.53s CPU, 1 rebuild
-```
-
-## Confirming it's a 10.5 regression
-
-Downgrade Storybook, leaving everything else alone:
-
-```sh
-npm install --save-dev storybook@10.4.6 @storybook/react-vite@10.4.6
-```
-
-Re-run the same two tests. The cost disappears:
-
-```
-                      10.5.5    10.4.6
-story save:           ~2.74s     ~0.18s
-unrelated .log write: ~2.71s     ~0.01s
-```
-
-## Scaling
-
-The performance gets worse with a larger module graph. If it's useful to see how performance degrades with module graph size, one can generate a larger repro with the `generate` script:
-
-```sh
-STORIES=2200 MODULES=1500 node generate.mjs
-```
-
-(Performance cost also seems to depend on module graph _topology_, but I left that out of this repro for simplicity. I can expand more for ya if it's actually useful data.)
